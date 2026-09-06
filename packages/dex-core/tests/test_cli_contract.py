@@ -52,6 +52,8 @@ def _all_commands() -> list[list[str]]:
                         "--expr",
                         "upper(x)",
                     ]
+                if group == "semantic" and sub == "ossie":
+                    argv.append("define")
                 argvs.append(argv)
         elif group == "demo":
             # The one verb that creates a file. Pointed at a directory that does
@@ -514,6 +516,7 @@ _SUBCOMMAND_PARITY: dict[tuple[str, str | None], dict] = {
             "infer_by_overlap": "infer_by_overlap",
             "refresh": "refresh",
             "use_project": "use_project",
+            "use_hosted_semantic_layer": "use_hosted_semantic_layer",
         },
     },
     ("explore", "map"): {
@@ -525,6 +528,7 @@ _SUBCOMMAND_PARITY: dict[tuple[str, str | None], dict] = {
             "infer_by_overlap": "infer_by_overlap",
             "refresh": "refresh",
             "use_project": "use_project",
+            "use_hosted_semantic_layer": "use_hosted_semantic_layer",
         },
     },
     ("explore", "diagram"): {"method": "diagram", "args": {"full": "full"}},
@@ -658,6 +662,14 @@ _SUBCOMMAND_PARITY: dict[tuple[str, str | None], dict] = {
             # so the map can assert the engine forwards it.
             "definitions_file": "definitions",
             "no_parse": "no_parse",
+        },
+    },
+    ("semantic", "ossie"): {
+        "method": "semantic_ossie",
+        "args": {
+            "mode": "mode",
+            "argument": _TRANSLATED,
+            "edits_file": _TRANSLATED,
         },
     },
     ("maintain", "snapshot"): {

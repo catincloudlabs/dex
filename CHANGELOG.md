@@ -9,6 +9,341 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-09-06
+
+### Added
+
+- **Native Apache Ossie workflows are documented end to end, and the pages that
+  still described a dbt-only world are corrected** ([#414]). `references/ossie-walkthrough.md`
+  is new: one document, one local DuckDB warehouse, and every command the native
+  semantic axis has, in the order you would run them. It covers configuration on
+  both axes, reading the catalog, the four cases that carry no physical column,
+  the governed route to take when `query` and `values` refuse, declared keys and
+  composite relationships reaching `explore` and `--verify`, a baseline and drift
+  with no transformation project present, and authoring through
+  `semantic ossie` and `transform apply`. Every command, envelope field, note,
+  and refusal quoted on that page came from a real run against `dex demo`.
+
+  The correction half matters more than the addition. Several committed pages
+  made claims that stopped being true when the native semantic axis shipped, and
+  a stale claim in a reference is worse than a missing one: `dbt-project.md` was
+  titled "the only write target" and said `transform` and `maintain` require a
+  dbt project; `skills/explore/SKILL.md` said two backends answer the semantic
+  commands when there are three; `canonical-model.md` argued against building on
+  an immature interchange format, using the predecessor name of the format dex
+  now reads; and `project.md` and `CONTRIBUTING.md` both offered "a semantic
+  layer that owns its own definitions" as a reason to write a project format,
+  which is now the case that must not be one. Those are fixed at the source
+  rather than annotated.
+
+  `skills/maintain/SKILL.md` had no native semantic content at all, so an agent
+  driving `maintain` against an Ossie-only repository had nothing to read: it now
+  covers the independent per-layer baseline, the two finding classes the semantic
+  axis adds, declared keys reaching `maintain grain` through the identical billed
+  handshake, why the dimension-cardinality scan never fires there, and why
+  `maintain reconcile` is advisory. `AGENTS.md` gains the `semantic_document`
+  edit kind it was already using in its own table, the Ossie behavior on the
+  `explore semantic values`, `explore semantic query` and four `maintain` rows,
+  the extras that are not connectors, and pointers to the semantic-layer
+  references it never listed. `CONTRIBUTING.md` gains a "Writing a semantic
+  source" section, so all three public extension seams are documented rather than
+  two. The asymmetry table in `references/semantic-layer.md` gains its third
+  column.
+
+  The three skill descriptions are widened to cover a semantic layer that is not
+  dbt, since a description is a triggering specification and none of them
+  mentioned one. Triggering cases were added to each eval corpus alongside, and
+  the new positives are cross-listed as negatives on the sibling skills so the
+  widening is measured rather than assumed.
+
+  Two claims in this changelog's own unreleased section were corrected in place:
+  `OssieSemanticLayer` never answered `transform_layer()`, and its absence is
+  deliberate, because Ossie declares no build step and a transform baseline over
+  it would be a baseline of nothing; and one entry still used
+  `SEMANTIC_PROJECT_FORMATS` as current after another recorded it renamed to
+  `SEMANTIC_SOURCE_FACTORIES`. No engine behavior changes here. The single source
+  edit is a truncated sentence in `SemanticConfig`'s docstring.
+
+- **Native Apache Ossie is constructed as a semantic source rather than through
+  the transformation-project factory, and can no longer be used as a project at
+  all** ([#413]). Ossie was already absent from the shipped project registry and
+  `project.format: ossie` was already refused, but every consumer except the
+  explore route still built the reader through `build_project()`, which enforces
+  `ExploreProject`. That is why the reader carried a `name` attribute and a
+  `definitions()` alias: two vestigial members whose only job was getting past a
+  check meant for formats that own a model graph.
+
+  A new `exmergo_dex_core.semantic_source` module is the seam instead:
+  `SemanticSourceContext` (repository, connector, and the vendor's own
+  coordinates, with no transformation-project directory) plus two
+  runtime-checkable capabilities, `SemanticCatalogSource` for the read catalog
+  and `SemanticSnapshotSource` for the drift fingerprint. `DexEngine.
+  semantic_catalog_source()` is the canonical accessor and
+  `semantic_catalog_format()` forwards to it. `maintain` now asks for the
+  snapshot *capability* rather than the project tier, so an Ossie-only
+  repository keeps its semantic baseline, and the reader satisfies none of
+  `ExploreProject`, `MaintainProject`, `EditableProject` or `PlacingProject`,
+  which is asserted rather than documented. `SEMANTIC_PROJECT_FORMATS` is
+  renamed `SEMANTIC_SOURCE_FACTORIES`; configuration keys, CLI commands,
+  envelope fields, and the stored snapshot schema are unchanged.
+
+- **A reviewed Ossie fixture corpus and a compatibility matrix, gated on the
+  pinned schema** ([#413]). `packages/dex-core/tests/ossie/fixtures/` holds
+  native documents a person can read plus a case manifest saying what each one
+  means: expected diagnostic rules and severities, whether each rule comes from
+  the pinned schema, upstream's integrity judgment or a dex restriction, and the
+  expected physical links, key tuples and relationship pairs. The expectations
+  are authored rather than captured, because a golden recorded from a run
+  asserts only that the implementation still does what it did.
+
+  `references/ossie-compatibility.md` states the same ground for a reader: what
+  is accepted, what is checked and at what severity, which expression dialect
+  dex reads, what links to a warehouse column and what deliberately does not,
+  and what dex does not claim (no converter interoperability, no execution
+  assurance, and a missing SQL check disclosed rather than passed). It names the
+  pin and the known deltas from upstream's current schema, including the
+  post-pin `THOUGHTSPOT` dialect, which is refused under this pin. An offline
+  test asserts that the loader constant, `PROVENANCE.md`, the corpus manifest
+  and the matrix carry the same hash, and that every claim in the matrix names a
+  case that exists.
+
+- **Shipped conformance contracts for a semantic source**
+  (`exmergo_dex_core.semantic_source_conformance`, under the existing
+  `[semantic-conformance]` extra) ([#413]). Four contracts covering
+  construction, declarations, the drift fingerprint, and the read catalog. The
+  assertions are extracted from the project contracts rather than copied, and
+  those contracts now compose them, so a project format and a semantic source
+  are held to one implementation of each shared rule. The runtime
+  `SemanticBackendContract` also gained descriptor-to-payload agreement, gap
+  declarations that name real fields and are not contradicted by the payload
+  they ship in, and shape checks on the declared-key and declared-relationship
+  channels.
+
+- **Native Ossie authoring plans are validated against cached exploration
+  evidence before they are stored, with no warehouse connection opened**
+  ([#412]). `semantic ossie define|update|plan` now checks each dataset's
+  source relation, direct field columns, declared keys, and relationship
+  endpoint columns against `.dex/cache.json`, reusing the exact same
+  `normalize_relation`/`match_identifier`/`column_reference` primitives the
+  read catalog already uses, so a reference dex would call invalid while
+  reading is checked by the identical rule at plan time.
+
+  The distinction the issue asks for is structural, not a judgment call: a
+  relation is refused only when it is absent from a namespace the cache
+  completely inventoried (a new `CacheProvenance.inventory_namespaces`,
+  populated from the same observed-namespace bookkeeping issue #149 already
+  established for carry-forward, not a new concept); a column is refused only
+  when it is missing from a relation the cache actually profiled. Everything
+  else, an unprofiled relation, a namespace never inventoried, a query-backed
+  or quoted source, a computed field expression, is a note, never a refusal:
+  absence of evidence is not evidence of absence. A refused reference stores
+  no plan, exactly like every other validation failure this command already
+  has.
+
+- **Native Ossie semantic documents can now be authored as reviewable plans**
+  with `semantic ossie define|update|plan` and applied through the existing
+  `transform apply` command ([#411]). The new `semantic_document` edit kind is
+  format-neutral and stored on the semantic-layer axis, so dbt remains the
+  transformation project and its semantic authoring behavior is unchanged.
+  Writes are limited to the exact paths configured in `semantic.ossie.files`;
+  the prospective full document set must pass the bundled Ossie schema,
+  integrity, expression, and cross-document namespace checks before a plan is
+  stored. Apply re-checks source hashes atomically, so one stale file refuses
+  every edit in the plan. Edits are whole-document replacements written
+  byte-for-byte: dex does not reformat YAML/JSON or touch unedited documents.
+  Ossie passes the shipped `SemanticEditTargetContract`, which exercises the
+  editable-tier and placement safety guarantees at the semantic-source seam.
+  It deliberately does not implement `EditableProject` or `PlacingProject`:
+  those protocols identify transformation projects, and the semantic-layer
+  architecture requires Ossie to remain independent of that axis.
+
+- **Native Apache Ossie semantic models are readable, through the semantic axis
+  rather than a set of vendor branches** ([#405], [#406], [#407]).
+  `semantic.vendor: ossie` reads native `.ossie.yaml` / `.ossie.yml` /
+  `.ossie.json` documents into the same catalog `explore semantic list` has
+  always returned, beside a dbt project or in a repository that has none.
+  Neither arrangement involves MetricFlow, and neither reader imports the
+  other's.
+
+  Ossie is [entering ASF maturity](https://github.com/apache/ossie) and every one
+  of its upstream converters converts *into* it from a vendor format, so this is
+  the first independent consumer implementation rather than a late follow. The
+  cost of being early is that the schema moves underneath the implementation,
+  which is why pinning is a first-class mechanism here with its own test: dex
+  vendors the upstream JSON Schema verbatim and asserts its sha256 against a
+  recorded constant. Upstream declares the document version as a constant that
+  does not move when the schema does, and says plainly that the schema may change
+  before release, so a version check would have been worthless as a drift signal.
+  Content hashing makes a regeneration a reviewed diff in a commit instead.
+
+  Three validation layers on three install tiers. Structure is the bundled schema
+  and needs the new `[ossie]` extra, which is one JSON Schema validator and
+  nothing else. Integrity is pure Python. Expression syntax rides on the existing
+  `[sql]` extra and, absent it, degrades to a **named skipped-validation note**
+  rather than a silent pass, following the refusal posture `guards/dialect.py`
+  already sets. The integrity layer ports the judgment in upstream's own
+  `validation/validate.py` so dex and upstream agree about what a valid document
+  is; two rules are dex's own and are carried back upstream as consumer findings.
+
+  **The read is deliberately conservative, and every place it declines says so.**
+  A field resolves to a physical column only when the whole dataset source is
+  accepted as one relation by the active connector *and* the selected expression
+  is an unquoted bare identifier. Ossie documents a source as
+  `database.schema.table` **or a query** with no portable discriminator, so a
+  source dex cannot address produces no column, no exposure annotation, and no
+  PII linkage: a query read as a relation would reach the PII gate as physical
+  evidence that does not exist. Metric lineage comes only from qualified
+  `dataset.field` references that resolve, and is **empty** when none do, because
+  Ossie states no metric-to-dataset reference and naming every dataset would be
+  the maximal claim dressed as a conservative one.
+
+  What Ossie structurally cannot carry is declared rather than left absent, since
+  an absent field and an undeclared one read identically to a caller. There are
+  no measures and no entities, so every field of both kinds is named in
+  `unavailable`; `metrics[].dimensions` is empty and declared, which is why
+  `--for-dimension` refuses off that declaration rather than off a vendor name.
+  `explore semantic query` and `values` refuse too: Ossie specifies interchange
+  metadata and not a portable query runtime, so rendering a statement would mean
+  inventing filter grammar and join planning the document's author never stated.
+
+  Two supporting changes fall out of this and are useful on their own.
+  `ProjectContext` gains a `connector` slot, because identifier arity, quoting
+  and case folding are the connector's rules and a format that guesses them links
+  a declaration to the wrong column or to none; it is a name, never an adapter
+  and never a credential. And `DimensionInfo` gains the `vendor_params` escape
+  hatch `MetricInfo` already had, so a format's dialect spellings and authored AI
+  context have a declared home instead of being dropped or smuggled into a
+  neighbouring field.
+
+- **Native Ossie documents reach maintain's tier 2, so `maintain snapshot` and
+  `maintain check` get a real drift baseline for a semantic vendor that is not
+  dbt** ([#409]). `OssieSemanticLayer` answers `semantic_layer()` (named
+  definitions, each with a content hash and the physical column behind it),
+  which is the half of the baseline it can honestly fill. It answers no
+  transform layer at all: Ossie declares no build step, so a transformation
+  baseline over it would be a baseline of nothing, and `maintain snapshot`
+  names the missing half in a warning rather than recording it as empty.
+
+  The snapshot shape gained two things it could not hold before, both additive
+  and both defaulted so a committed `.dex/snapshot.json` from before this
+  change still loads: `SemanticModelDef.relation` (the semantic model's own
+  physical relation, for a format with no build step to name a `model_ref`
+  through) and `.keys` (every declared unique key, one list of columns per
+  declaration regardless of arity), plus a new `SemanticLayerSnapshot.
+  relationships` list carrying full composite ordered column pairs. None of
+  it bumps `SNAPSHOT_SCHEMA_VERSION`.
+
+  The hazard the issue named directly: an old baseline's empty `relationships`
+  and `keys` is indistinguishable from "this layer declares none", which would
+  make relationship and key drift report a false clean bill instead of "not
+  checked". `SemanticLayerSnapshot.relationships_and_keys_captured` (default
+  `False`) is the guard, the same role `warehouse_from` already plays for the
+  warehouse side: `semantic_free_drift`'s two new finding classes,
+  `broken_relationship` (a relationship whose model or column pair no longer
+  resolves) and the key-column analogue of `dangling_reference`, run only when
+  the *current* read set it; relationship added/removed/changed detection
+  (folded into the existing generic diff) runs only when *both* the baseline
+  and the current read did, so a baseline that never captured relationships
+  never reads every current one as freshly added. dbt's own snapshots leave
+  the flag `False`: it has no composite-relationship or multi-column-key
+  concept at the semantic-model level to capture, and that is an honest
+  narrower answer, not a regression.
+
+  The two layers are read independently now (`maintain/commands.py`'s
+  `_read_layers`), through the same seam #408 added on the explore side: the
+  semantic half comes from whichever source answers `semantic.vendor`
+  (`SEMANTIC_SOURCE_FACTORIES`, a table lookup rather than a name check), not
+  always from the configured `project.format`. A repository with no dbt
+  project at all and `semantic.vendor: ossie` gets a semantic baseline even
+  though the transform half has nothing to answer with, and a repository that
+  keeps dbt for its models with Ossie's semantics declared beside it gets both,
+  each degrading on its own rather than one absence hiding the other's
+  presence.
+
+- **`maintain grain`/`maintain check` verify Ossie's declared primary and
+  unique keys, composite ones included** ([#410]). `grain_plan` read declared
+  composite keys exclusively from `engine.project_format().definitions()`,
+  which is never Ossie, so its `primary_key`/`unique_keys` declarations never
+  reached the one code path that actually probes a declared grain against the
+  live warehouse (`declared_grain_not_unique`), no matter how the connector
+  was configured. A new `_composed_definitions` folds in a differing semantic
+  vendor's own keys additively, the same seam #408's `_fold_semantic_layer_keys`
+  and #409's `_semantic_layer` already use, so a repository with no dbt
+  project at all and `semantic.vendor: ossie` now gets its declared grain
+  checked as the never-measured declaration it is (`declared_grain_not_unique`,
+  never the demoted "was unique, no longer is" `key_lost_uniqueness` a
+  measurement it never earned would read as), and priced and
+  confirmation-gated through the identical billed handshake every other
+  connector already goes through. Relationship
+  verification needed no change: #408 already routed Ossie's composite
+  declarations through the same neutral `Relationship`/`--verify` path any
+  other format's do. Nothing here proposes an edit; a failed declaration
+  surfaces only as a finding, the existing behavior for every format and,
+  for Ossie specifically, also true because it has no write tier to edit at
+  all.
+
+- **A semantic layer's own declared dataset keys now reach grain detection**
+  ([#408]). Ossie is never the transformation project `engine.project_format()`
+  resolves, so its `primary_key`/`unique_keys` declarations had no route to
+  `explore profile --use-project`'s grain channel at all: only a dbt project's
+  own tier-1 `definitions()` fed it. `SemanticLayer` gains a `declared_keys()`
+  capability, the same shape `declared_relationships()` already established;
+  every backend but Ossie's returns nothing, because a dbt-backed layer's keys
+  already reach grain through the project route and stating them twice would
+  only ever double-count. `explore commands.py` calls this capability
+  unconditionally rather than branching on which vendor is configured, honoring
+  the same architectural rule `test_no_command_carries_a_vendor_branch` already
+  enforces elsewhere. A repository with both dbt and Ossie gets both sets of
+  keys, additively, not a choice between them.
+
+- **Declared relationships that disagree about which columns join the same two
+  datasets are now flagged rather than silently doubled** ([#408]). Two
+  declarations naming the same dataset pair with different column pairs used
+  to fold into two separate, unlabeled edges with nothing to say they
+  contradict each other. `explore map` and `explore relationships` now surface
+  every such pair as a `DeclaredRelationshipConflict` in the new `conflicts`
+  field, naming every disagreeing declaration and its columns and source, with
+  a note pointing at the structured field. Every declaration is still kept as
+  its own edge: dex reports the disagreement rather than picking a winner.
+
+- **`--use-project` and `--use-hosted-semantic-layer` now compose instead of
+  one silently winning** ([#408]). Passing both used to read only the local
+  project's semantic layer; the hosted read, and its "cannot add map exposure
+  annotations" note, never ran. Both are now read and unioned: semantic
+  models, metrics, dimensions and measures merge by name (the local entry
+  wins a name both declare, since it is the side with physical relations),
+  and an entity declared on both sides merges its per-model roles and
+  re-derives its summary `type` from the wider set rather than one side's
+  declaration overwriting the other's. Relationship-edge extraction reads
+  both sources the same way, though no shipped hosted backend returns
+  physical relations there today, so every edge still comes from the local
+  read in practice. A hosted vendor with no local counterpart (or the
+  reverse, such as Ossie's own vendor having no hosted deployment) degrades
+  to whichever side actually answered instead of losing a read that already
+  succeeded.
+
+### Fixed
+
+- **`transform apply` refused a native semantic plan on an install carrying only
+  `[ossie]`** ([#413]). The command router asserted the dialect engine before
+  dispatching every authoring verb, and `transform.commands` imported it
+  eagerly, so an install with a semantic reader and no connector extra could
+  author a plan it could never apply, which is the one command that install
+  exists to run. The two dialect-engine imports in `transform.commands` are now
+  reached at the point of use, and the router reads the stored plan's edit
+  target and asserts the dialect engine only for the plans that author SQL. It
+  fails toward asserting it, so an apply that cannot resolve a plan still
+  refuses with the message it always did.
+
+- **A composite relationship's Mermaid label named only the child-side columns,
+  silently dropping the parent side.** ([#408]) `explore diagram`'s edge label
+  joined `from_columns` alone, so `(product_id, variant_id)` rendered as
+  `"product_id, variant_id, declared"` with no way to tell which child column
+  paired with which parent column, or that a parent side existed at all. The
+  label now pairs every column (`"product_id = id, variant_id = variant_id"`);
+  a single pair sharing one name on both sides, the common case, still renders
+  as that bare name unchanged.
+
 ## [1.10.0] - 2026-09-05
 
 ### Changed

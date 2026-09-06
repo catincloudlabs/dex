@@ -41,7 +41,9 @@ Before concluding anything about the layer, read four payload fields:
   into `--group-by`. `declarations` means the list is the single-hop declared view
   and a query can group by more than it names, which is what `--local` reports
   without the `[semantic]` extra. Two backends reporting different dimension
-  counts for one layer is this field, not a bug.
+  counts for one layer is this field, not a bug. A native Ossie layer always
+  reports `declarations`, because the format states no join graph to resolve
+  through.
 - `unavailable`. Fields the answering backend structurally cannot supply. An
   absent `label` here means "this path cannot carry one", not "the project
   declared none", and the difference decides whether looking elsewhere is worth
@@ -125,6 +127,38 @@ often does not.
 - **An unknown metric or dimension name is refused by name.** A search term that
   matched nothing is not: it comes back as a note, because a substring matching
   nothing is an honest answer about the layer's words.
+- **A backend that declares a field unavailable refuses the command that needs
+  it**, rather than answering from the empty value. `--for-dimension` on a layer
+  whose backend lists `dimensions` under `unavailable.metrics` is the standing
+  example. Read `unavailable` before concluding anything from an empty list.
+
+## When the layer is native Apache Ossie
+
+`vendor: ossie` means the layer is native Ossie documents in the repository rather
+than a dbt project. `list` works and reads the same shape as anywhere else, and
+the payload says so on `vendor`. Three things differ, and each is a property of the
+format rather than a missing feature:
+
+- **`query` and `values` refuse.** Ossie specifies interchange metadata and not a
+  portable query runtime, so there is no filter grammar and no join planning to
+  render a governed statement from. Take the physical route instead: a dimension
+  names its `semantic_model`, that model names its `relation`, and `explore
+  profile` then `explore query` reach the values under the firewall and the cost
+  guard. Do not present the refusal as dex being unable to reach the layer.
+- **`--for-dimension` refuses**, because Ossie states no metric-to-dimension
+  relationship at all. `metrics[].dimensions` is empty and `unavailable.metrics`
+  says why. An empty groupable list here is not "this metric can be grouped by
+  nothing".
+- **A metric with no `semantic_models` is a metric whose lineage did not resolve**,
+  not one that reads nothing. Ossie carries no metric-to-dataset reference, so dex
+  reports only what a qualified reference in the expression proved, and reports
+  nothing when none did.
+
+An element with no `column` is also normal here and the notes say which of four
+reasons applies: a computed expression, a quoted identifier, a query-backed
+dataset source, or a field written only in a non-SQL dialect. In every one of them
+dex declined to guess a column rather than failed to find one, so do not go looking
+for the column yourself and do not treat the absence as a data problem.
 
 ## Cost, and which backend answered
 
@@ -135,6 +169,9 @@ statement it could price or cap, so the result carries an explicit warning that
 spend is governed there. Do not present a hosted result as cost-guarded, and do
 not treat the absence of an estimate as "it was free".
 
-`list` and the catalog side cost no warehouse query on either backend: one GraphQL
-round trip hosted, one compiled-artifact read locally. `values` and `query` do
-spend, on both.
+`list` and the catalog side cost no warehouse query on any backend: one GraphQL
+round trip hosted, one compiled-artifact read locally, one repository read for a
+native layer. `values` and `query` do spend on the two dbt backends. On a native
+Ossie layer neither runs at all, so the only spend on that path is the
+`explore profile` and `explore query` you reach for instead, and those carry
+their own estimate and confirmation.

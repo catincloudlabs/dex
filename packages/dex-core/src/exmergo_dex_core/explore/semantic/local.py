@@ -23,7 +23,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from ... import command_args, metricflow_dialect
 from ... import envelope as env
@@ -169,6 +169,17 @@ class LocalMetricFlowBackend:
         return SemanticCatalog.from_view(
             view, self, notes=[_UNRESOLVED_JOINS_NOTE] if unresolved else []
         )
+
+    def declared_relationships(self) -> list[Any]:
+        """MetricFlow entity joins are derived from the catalog by explore."""
+
+        return []
+
+    def declared_keys(self) -> tuple[list[Any], list[Any]]:
+        """dbt's own declared keys already reach grain through its project
+        format's ``definitions()``; stating them here too would double them."""
+
+        return [], []
 
     def _semantic_view(self):
         """The project's semantic catalog, read once per command.

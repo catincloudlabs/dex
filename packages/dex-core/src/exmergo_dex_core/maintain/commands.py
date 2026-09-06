@@ -58,7 +58,8 @@ from .results import (
 )
 
 if TYPE_CHECKING:
-    from ..adapters.project import ExploreProject
+    from ..adapters.project import ExploreProject, MaintainProject
+    from ..dbt_project import ProjectDefinitions
     from ..engine import DexEngine
     from .snapshot import SemanticLayer, TransformLayer
 
@@ -110,10 +111,14 @@ def _read_layers(
 ) -> tuple[TransformLayer | None, SemanticLayer | None, str | None]:
     """The current project's snapshot layers, or why there are none.
 
-    Returns ``(transform, semantic, reason)``. ``reason`` is ``None`` on success
-    and otherwise a clause each command folds into its own warning, so the four
-    detection commands share one definition of "read the project" while keeping
-    the sentence that says what *this* command loses without it.
+    Returns ``(transform, semantic, reason)``. ``reason`` describes why the
+    layer ``semantic`` actually asked for is unavailable (the transform half
+    when ``semantic=False``, otherwise the semantic half), which is what each
+    command's warning names and what ``check`` gates its semantic axis on. It
+    is ``None`` whenever that layer is present, even if the *other* one is
+    not: the two are read independently, so a repository whose
+    semantic vendor answers on its own is not blocked by a transformation
+    project neither it nor that vendor needs.
 
     ``semantic=False`` skips the second layer rather than reading and discarding
     it. `maintain schema` needs only the transform half, and on the dbt format
@@ -129,15 +134,126 @@ def _read_layers(
     same reason ``definitions()`` may not raise.
     """
 
+    project: MaintainProject | None = None
+    transform: TransformLayer | None = None
+    transform_reason: str | None = None
     try:
         project = engine.maintain_project()
         if project is None:
-            return None, None, engine.project_tier_note()
-        transform = project.transform_layer()
-        current = project.semantic_layer() if semantic else None
+            transform_reason = engine.project_tier_note()
+        else:
+            transform = project.transform_layer()
     except (ProjectError, RepoRootRequiredError, ValidationError) as exc:
-        return None, None, str(exc)
-    return transform, current, None
+        transform_reason = str(exc)
+
+    if not semantic:
+        return transform, None, transform_reason
+
+    current: SemanticLayer | None = None
+    semantic_reason: str | None = None
+    try:
+        current = _semantic_layer(engine, project)
+    except (ProjectError, RepoRootRequiredError, ValidationError) as exc:
+        semantic_reason = str(exc)
+
+    # `semantic_reason` names why the semantic-vendor substitute came
+    # back empty; when there was none to try, `transform_reason` is the only
+    # explanation on hand (the same project answered, or failed to build,
+    # for both), and a caller must still see *some* reason rather than a
+    # blank one that reads as success.
+    reason = (semantic_reason or transform_reason) if current is None else None
+    return transform, current, reason
+
+
+def _semantic_layer(
+    engine: DexEngine, project: MaintainProject | None
+) -> SemanticLayer | None:
+    """The semantic-axis snapshot, from whichever source answers it.
+
+    Usually ``project`` itself: the semantic vendor defaults to dbt, the same
+    format ``transform_layer()`` just came from. A repository that configures a
+    different semantic vendor beside it (``semantic.vendor: ossie``) gets that
+    source's own fingerprint instead, through the identical seam
+    ``_semantic_catalog`` reads on the explore side, rather than a second,
+    vendor-specific snapshot section: a table lookup against
+    ``SEMANTIC_SOURCE_FACTORIES``, not a name check on which vendor is
+    configured.
+
+    Read independently of ``project``, which may be ``None`` or may have failed
+    to build its own transform layer: a repository with no dbt project at all and
+    ``semantic.vendor: ossie`` still gets a semantic baseline, even though the
+    transform half has nothing to answer with.
+
+    The capability is asked for rather than the type: a source that can produce a
+    fingerprint satisfies ``SemanticSnapshotSource``, and one that answers only a
+    read catalog declines here and is reported as absent by the caller. Asking
+    for a *project* tier instead would be asking a semantic source to claim a
+    model graph it does not own, and would silently drop the baseline for the
+    vendors that correctly refuse to.
+    """
+
+    from ..config import SEMANTIC_SOURCE_FACTORIES
+    from ..semantic_source import SemanticSnapshotSource
+
+    vendor = (getattr(engine.config.semantic, "vendor", None) or "dbt").lower()
+    if vendor in SEMANTIC_SOURCE_FACTORIES:
+        source = engine.semantic_catalog_source()
+        if isinstance(source, SemanticSnapshotSource):
+            return source.semantic_layer()
+    if project is None:
+        return None
+    return project.semantic_layer()
+
+
+def _composed_definitions(
+    engine: DexEngine, project: ExploreProject | None
+) -> ProjectDefinitions | None:
+    """Declared keys and joins, with a differing semantic vendor's own keys
+    folded in additively.
+
+    Takes the project the caller already read rather than resolving one of its
+    own: the format is built once per command, and a repo-less host has no
+    project to build, so ``None`` in is ``None`` out and the grain survey runs
+    on its measured half alone.
+
+    Grain verification (`maintain grain`/`maintain check`) reads declared
+    composite keys off ``ProjectDefinitions.declared_composite_keys``, which
+    the project's own ``definitions()`` alone never carries for a semantic
+    vendor that is not the project: it is never the transformation project that
+    method resolves, which is the same fact the explore-side grain channel works
+    around in `explore.commands._fold_semantic_layer_keys`. Mirrored here rather
+    than imported from there, the way `_semantic_layer` above is its own
+    implementation beside `explore.commands._semantic_catalog`: each module
+    composes through the same neutral `SemanticLayer.declared_keys()` seam
+    rather than one reaching into the other's private helper.
+
+    Additive and silent on every declinable condition, matching
+    ``declared_keys()``'s own contract: a format with nothing to add (dbt,
+    whose keys already reach here through this same call) returns empty and
+    changes nothing.
+    """
+
+    if project is None:
+        return None
+    defs = project.definitions()
+    if engine.repo_root is None:
+        return defs
+    try:
+        from ..explore.semantic import resolve_semantic_layer
+
+        layer = resolve_semantic_layer(engine, local=True)
+        keys, composite_keys = layer.declared_keys()
+    except (DexError, ValueError, OSError):
+        return defs
+    if not keys and not composite_keys:
+        return defs
+    return defs.model_copy(
+        update={
+            "present": True,
+            "declared_keys": [*defs.declared_keys, *keys],
+            "declared_composite_keys": [*defs.declared_composite_keys, *composite_keys],
+        }
+    )
 
 
 class NoBaselineError(PrerequisiteError):
@@ -547,9 +663,8 @@ def grain_drift(engine: DexEngine, objects: list[str] | None = None) -> DriftRes
         else None
     )
     project, _ = _read_project(engine)
-    plan = drift_mod.grain_plan(
-        adapter, snap, scope, project.definitions() if project is not None else None
-    )
+    composed_definitions = _composed_definitions(engine, project)
+    plan = drift_mod.grain_plan(adapter, snap, scope, composed_definitions)
     if (
         plan.key_checks
         or plan.fanout_pairs
@@ -849,9 +964,8 @@ def check(engine: DexEngine, objects: list[str] | None = None) -> DriftResult:
     # baseline tier, and a format narrower than it still declares a grain worth
     # re-verifying here.
     project, _ = _read_project(engine)
-    plan = drift_mod.grain_plan(
-        adapter, snap, scope, project.definitions() if project is not None else None
-    )
+    composed_definitions = _composed_definitions(engine, project)
+    plan = drift_mod.grain_plan(adapter, snap, scope, composed_definitions)
     # Added before both returns, so a declared grain the survey could not reach
     # is reported whether the scans run or stop at the handshake.
     warnings.extend(plan.notes)
@@ -1056,8 +1170,11 @@ def reconcile(engine: DexEngine, drift_class: str | None = None) -> ReconcileRes
     # files contain. `view` carries the bytes an edit is pinned against; this
     # carries the grain, and an edit that contradicts a declared grain is one no
     # format is obliged to keep. Tier 1, so the read cannot raise; `None` is the
-    # answer when there was no format to read it from.
-    definitions = project.definitions() if project is not None else None
+    # answer when there was no format to read it from. Composed with a
+    # differing semantic vendor's own keys, so a proposal for a column
+    # Ossie already covers via a declared composite is not suggested as if
+    # nothing declared it.
+    definitions = _composed_definitions(engine, project)
     proposals, edits, build_warnings = reconcile_mod.build(
         findings,
         snap,

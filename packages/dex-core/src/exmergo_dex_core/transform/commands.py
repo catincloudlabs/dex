@@ -22,21 +22,20 @@ import argparse
 import contextlib
 import json
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from .. import command_args
 from .. import envelope as env
-from ..adapters.project import PlacingProject, placement_gap
 from ..config import pii_override_paths
-from ..dbt_project import ApplyResult as PlanApplyResult
-from ..dbt_project import EditOp
+from ..edits import ApplyResult as PlanApplyResult
+from ..edits import EditOp, SemanticEditTarget
 from ..errors import DexError
 from ..results import to_envelope
 from ..storage import Store, readable_cache
 from . import plans as plans_mod
-from . import semantic as semantic_mod
+from .native_semantic import edits_from_payload, plan_hint, read_payload_file
 from .plans import EditKind, PlanEdit, PlanError
 from .results import (
     ApplyResult,
@@ -51,10 +50,25 @@ from .results import (
     PropagationResult,
     TestScaffoldResult,
 )
-from .validate import EditValidationError
 
 if TYPE_CHECKING:
     from ..engine import DexEngine
+    from . import semantic as semantic_mod
+
+# Two of this module's neighbours reach the dialect engine at import (`.semantic`
+# for MetricFlow-shaped YAML, `.validate` for SQL), and importing either here
+# would put sqlglot behind every verb this module serves. Most of them need it;
+# `apply` does not, and `transform apply` is how a native semantic plan is
+# written. An install carrying only a semantic reader has no sqlglot, so an
+# eager import here would let that install author a plan it could never apply.
+# Reached at the point of use instead, which is where the dependency is real.
+
+
+def _semantic() -> Any:
+    from . import semantic
+
+    return semantic
+
 
 # What actually caps a dbt statement server-side, per compute-time connector:
 # a per-connector fact, kept out of the shared build arm so the next connector
@@ -362,11 +376,11 @@ def cmd_plan(args: argparse.Namespace, engine: DexEngine) -> env.Envelope:
         result = plan(
             engine,
             getattr(args, "argument", None) or "",
-            edits=_edits_from_payload(getattr(args, "edits_file", None)),
+            edits=edits_from_payload(getattr(args, "edits_file", None)),
             scaffold=getattr(args, "scaffold", None),
             attribute_rows=getattr(args, "attribute_rows", None),
         )
-        return to_envelope(result, hints=_plan_hint(result))
+        return to_envelope(result, hints=plan_hint(result))
     except DbtParseError as exc:
         return env.error_for(exc, warnings=exc.warnings)
     except ValueError as exc:
@@ -434,7 +448,7 @@ def _propagate(
         kind,
         old,
         new,
-        extra_edits=_edits_from_payload(edits_file),
+        extra_edits=edits_from_payload(edits_file),
     )
     planned = plan(engine, outcome.intent, edits=outcome.edits, attribute_rows=False)
     return PropagationResult(
@@ -460,7 +474,7 @@ def cmd_rename(args: argparse.Namespace, engine: DexEngine) -> env.Envelope:
             args.new,
             edits_file=getattr(args, "edits_file", None),
         )
-        return to_envelope(result, hints=_plan_hint(result))
+        return to_envelope(result, hints=plan_hint(result))
     except DbtParseError as exc:
         return env.error_for(exc, warnings=exc.warnings)
     except ValueError as exc:
@@ -472,7 +486,7 @@ def cmd_remove(args: argparse.Namespace, engine: DexEngine) -> env.Envelope:
         result = remove(
             engine, args.kind, args.name, edits_file=getattr(args, "edits_file", None)
         )
-        return to_envelope(result, hints=_plan_hint(result))
+        return to_envelope(result, hints=plan_hint(result))
     except DbtParseError as exc:
         return env.error_for(exc, warnings=exc.warnings)
     except ValueError as exc:
@@ -646,7 +660,7 @@ def cmd_macro(args: argparse.Namespace, engine: DexEngine) -> env.Envelope:
         )
     if result.up_to_date:
         return to_envelope(result)
-    return to_envelope(result, hints=_plan_hint(result))
+    return to_envelope(result, hints=plan_hint(result))
 
 
 def test_scaffold(engine: DexEngine, model_name: str | None) -> TestScaffoldResult:
@@ -699,7 +713,7 @@ def cmd_test(args: argparse.Namespace, engine: DexEngine) -> env.Envelope:
 
     try:
         result = test_scaffold(engine, getattr(args, "scaffold", None))
-        return to_envelope(result, hints=_plan_hint(result))
+        return to_envelope(result, hints=plan_hint(result))
     except DbtParseError as exc:
         return env.error_for(exc, warnings=exc.warnings)
     except (ValueError, TestScaffoldError) as exc:
@@ -727,7 +741,13 @@ def apply(engine: DexEngine, plan_id: str | None = None) -> ApplyResult:
             )
         plan_id = latest.plan_id
 
-    repo_root = engine.require_repo_root("applying a plan to the dbt project")
+    repo_root = engine.require_repo_root("applying a plan")
+    stored = store.load_plan(plan_id)
+    semantic_layer = None
+    if stored.edit_target == "semantic":
+        candidate = engine.semantic_catalog_source()
+        if isinstance(candidate, SemanticEditTarget):
+            semantic_layer = candidate
     outcome: PlanApplyResult = plans_mod.apply(
         plan_id,
         repo_root,
@@ -737,7 +757,10 @@ def apply(engine: DexEngine, plan_id: str | None = None) -> ApplyResult:
         # format that placed an edit into its own keyspace is the one that writes
         # it. `None` here is a format declining the write tier, and falls back to
         # dbt's writer, which is where every plan went before the seam.
-        project_format=engine.editable_project(),
+        project_format=(
+            None if stored.edit_target == "semantic" else engine.editable_project()
+        ),
+        semantic_layer=semantic_layer,
     )
     conflicts = [c.model_dump(mode="json") for c in outcome.conflicts]
     if outcome.conflicts and not outcome.written:
@@ -1081,6 +1104,14 @@ def cmd_semantic_plan(args: argparse.Namespace, engine: DexEngine) -> env.Envelo
     return _semantic_envelope(args, engine, "plan")
 
 
+def _validation_error() -> type[Exception]:
+    """`.validate`'s error, reached lazily for the reason above it."""
+
+    from .validate import EditValidationError
+
+    return EditValidationError
+
+
 def _semantic_envelope(
     args: argparse.Namespace, engine: DexEngine, mode: str
 ) -> env.Envelope:
@@ -1088,7 +1119,7 @@ def _semantic_envelope(
         result = _SEMANTIC_AUTHORING[mode](
             engine,
             getattr(args, "argument", None) or "",
-            _edits_from_payload(
+            edits_from_payload(
                 getattr(args, "edits_file", None), default_kind=EditKind.SEMANTIC_YML
             ),
             definitions=_definitions_from_payload(
@@ -1096,13 +1127,13 @@ def _semantic_envelope(
             ),
             no_parse=bool(getattr(args, "no_parse", False)),
         )
-    except EditValidationError as exc:
+    except _validation_error() as exc:
         return env.error_for(exc)
     except DbtParseError as exc:
         return env.error_for(exc, warnings=exc.warnings)
     except ValueError as exc:
         return env.error_for(exc)
-    return to_envelope(result, hints=_plan_hint(result))
+    return to_envelope(result, hints=plan_hint(result))
 
 
 # --- helpers -----------------------------------------------------------------
@@ -1119,10 +1150,6 @@ class DbtParseError(DexError):
     def __init__(self, message: str, *, warnings: list[str] | None = None):
         super().__init__(message)
         self.warnings = warnings or []
-
-
-def _plan_hint(result: PlanResult) -> dict[str, str]:
-    return {"next": f"review the diffs, then `transform apply {result.plan_id}`"}
 
 
 def _record_build_spend(
@@ -1428,6 +1455,8 @@ def _failure_message(prefix: str, messages: list[str]) -> str:
 
 
 def _make_plan(engine: DexEngine, intent: str, edits: list[PlanEdit]) -> PlanResult:
+    from ..adapters.project import PlacingProject, placement_gap
+
     repo_root = engine.require_repo_root("storing a transform plan")
     editable = engine.editable_project()
     # The directory these edits are pinned against has to name the same project
@@ -1524,7 +1553,7 @@ def _semantic_plan(
         # on one code path regardless of how the caller expressed the change.
         edits = [
             PlanEdit(path=path, kind=EditKind.SEMANTIC_YML, new_content=content)
-            for path, content in semantic_mod.splice_definitions(definitions, view)
+            for path, content in _semantic().splice_definitions(definitions, view)
         ]
         scope = {(d.kind, d.name) for d in definitions}
         removed = [d for d in definitions if d.op is EditOp.DELETE]
@@ -1550,7 +1579,7 @@ def _semantic_plan(
 
     parsed_by_path = [(e.path, yaml.safe_load(e.new_content)) for e in edits]
     parsed_edits = [parsed for _path, parsed in parsed_by_path]
-    classification = semantic_mod.check_mode(
+    classification = _semantic().check_mode(
         mode,
         parsed_by_path,
         view,
@@ -1559,11 +1588,11 @@ def _semantic_plan(
     )
     # The two reference directions: what this payload's own definitions read,
     # then what the surviving project reads out of what it removes.
-    semantic_mod.check_references(parsed_edits, view)
-    semantic_mod.check_removals(
+    _semantic().check_references(parsed_edits, view)
+    _semantic().check_removals(
         removed, [(e.path, e.new_content or "") for e in edits], view
     )
-    spine_warning = semantic_mod.time_spine_warning(view, parsed_edits)
+    spine_warning = _semantic().time_spine_warning(view, parsed_edits)
 
     # The authoritative gate: a plan that dbt cannot parse is never stored.
     # Skipped when the time-spine warning fires (dbt would refuse to parse for
@@ -1643,7 +1672,11 @@ def _definitions_from_payload(
 
     if definitions_file is None:
         return []
-    raw = sys.stdin.read() if definitions_file == "-" else _read_file(definitions_file)
+    raw = (
+        sys.stdin.read()
+        if definitions_file == "-"
+        else read_payload_file(definitions_file)
+    )
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -1651,69 +1684,4 @@ def _definitions_from_payload(
     entries = payload.get("definitions") if isinstance(payload, dict) else None
     if not isinstance(entries, list):
         raise ValueError('definitions payload must be {"definitions": [...]}')
-    return semantic_mod.parse_definition_payload(entries)
-
-
-def _edits_from_payload(
-    edits_file: str | None, default_kind: EditKind | None = None
-) -> list[PlanEdit]:
-    """Read the agent-authored edits payload (a file path, or ``-`` for stdin).
-
-    Shape: ``{"edits": [{"path": ..., "kind": ..., "op": ..., "content": ...},
-    ...]}``. ``op`` defaults to ``"upsert"`` (create or update): those carry
-    ``content``. An ``op`` of ``"delete"`` removes the file and carries no
-    ``content``. ``kind`` may be omitted when the command implies it (semantic
-    define/update).
-    """
-
-    if edits_file is None:
-        return []
-    raw = sys.stdin.read() if edits_file == "-" else _read_file(edits_file)
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"edits payload is not valid JSON: {exc}") from exc
-    entries = payload.get("edits") if isinstance(payload, dict) else None
-    if not isinstance(entries, list):
-        raise ValueError('edits payload must be {"edits": [...]}')
-
-    edits: list[PlanEdit] = []
-    for i, entry in enumerate(entries):
-        if not isinstance(entry, dict) or "path" not in entry:
-            raise ValueError(f"edits[{i}] needs at least a path")
-        try:
-            op = EditOp(entry.get("op") or EditOp.UPSERT.value)
-        except ValueError as exc:
-            raise ValueError(
-                f"edits[{i}] has an unknown op '{entry.get('op')}': one of "
-                + ", ".join(o.value for o in EditOp)
-            ) from exc
-        kind = entry.get("kind") or default_kind
-        if kind is None:
-            raise ValueError(
-                f"edits[{i}] needs a kind: one of "
-                + ", ".join(k.value for k in EditKind)
-            )
-        has_content = "content" in entry
-        if op is EditOp.UPSERT and not has_content:
-            raise ValueError(f"edits[{i}] is an upsert and needs content")
-        if op is EditOp.DELETE and has_content:
-            raise ValueError(f"edits[{i}] is a delete and must not carry content")
-        edits.append(
-            PlanEdit(
-                path=entry["path"],
-                kind=EditKind(kind),
-                op=op,
-                new_content=entry.get("content"),
-            )
-        )
-    return edits
-
-
-def _read_file(path: str) -> str:
-    from pathlib import Path
-
-    p = Path(path)
-    if not p.is_file():
-        raise ValueError(f"edits file not found: {path}")
-    return p.read_text(encoding="utf-8")
+    return _semantic().parse_definition_payload(entries)

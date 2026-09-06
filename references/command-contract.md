@@ -214,6 +214,10 @@ dex transform test --scaffold <m> -> plan a unit_tests: skeleton for model <m>: 
 dex semantic define|update|plan   -> dbt semantic model edits as diffs (fronted by transform);
                                      validated up to and including dbt's own parser; applied with
                                      transform apply like any other plan
+dex semantic ossie define|update|plan
+                                  -> native Ossie whole-document edits as diffs; limited to the exact
+                                     files in semantic.ossie.files, validated as one prospective
+                                     layer, and applied atomically with transform apply
 dex maintain snapshot [--project-only]
                                   -> capture/refresh the known-good baseline in .dex/snapshot.json;
                                      --project-only re-fingerprints only project layers and carries the
@@ -264,7 +268,8 @@ hands it over via `--edits-file <path>` (or `-` for stdin), a JSON payload:
 `kind` is one of `model_sql`, `schema_yml`, `semantic_yml` (optional on
 `semantic define|update`, which imply `semantic_yml`), `packages_yml`,
 `macro_sql`, `snapshot_sql`, `seed_csv`, `test_sql`, `analysis_sql`,
-`project_yml`, or `profiles_yml`. Each edit also has an `op`:
+`project_yml`, `profiles_yml`, or `semantic_document` (optional on `semantic
+ossie define|update|plan`). Each edit also has an `op`:
 `upsert` (create or update, the default, carrying `content`) or `delete` (remove
 the file, no `content`). A delete is a reviewable diff pinned to the file's hash
 like any other edit, and it is guarded: the plan is refused if any surviving file
@@ -560,6 +565,16 @@ replace) inlines a literal credential, so no secret ever reaches the diff.
   The file comes back without that one definition, as an ordinary content edit,
   so the plan store, the diffs, and `transform apply` see the unit they always
   have.
+- `semantic ossie define|update|plan` is the corresponding native-file route.
+  Its namespace guard is the semantic-model namespace across every configured
+  document: `define` rejects existing names, `update` rejects missing names,
+  and `plan` reports a mixed change under `defined` and `updated`. Each edit is
+  a complete configured `.ossie.yaml`, `.ossie.yml`, or `.ossie.json` document;
+  Dex overlays all edits in memory and validates the prospective configured set
+  before storing anything. It writes the accepted content byte-for-byte, with
+  no YAML/JSON reformatting, and never changes a configured document absent from
+  the payload. File removal is not part of this command.
+
 
 Skill-to-subcommand mapping: `explore` fronts `connect`/`explore`; `transform`
 fronts `transform`, `semantic`, and `viz`; `maintain` fronts the whole
@@ -601,8 +616,8 @@ warn when the baseline was pinned from a cache older than
 rather than on which file was written last, so re-pinning cannot silence it.
 
 **`explore semantic` queries the semantic layer; `transform` and the `semantic`
-group author it, and `maintain semantic` detects drift in it.** Two backends answer
-the same three subcommands through one abstraction, chosen ambiently by
+group author it, and `maintain semantic` detects drift in it.** Three backends
+answer the same three subcommands through one abstraction, chosen ambiently by
 `semantic.vendor` and `semantic.deployment` in `.dex/config.yml` (the released
 `semantic.backend` spelling of the two is still accepted) and overridable per
 command with `--local` / `--api`. Those two flags name **who executes**, not which
@@ -610,6 +625,22 @@ vendor: every catalog and every result reports it as `execution` (`dex` or
 `vendor`), and that is the axis the guards read. A vendor-executed backend owns the
 warehouse connection, so dex never holds a statement it could price or cap, and
 every hosted result carries a warning saying exactly that.
+
+**`vendor: ossie` reads native Apache Ossie documents from the repository**, with
+no dbt project and no MetricFlow in the path. It is catalog-first because the
+format is: Ossie specifies interchange metadata and not a portable query runtime,
+so `list` answers and `query` and `values` refuse by name rather than inventing
+filter grammar, join planning, and execution semantics the document's author never
+stated. `--for-dimension` refuses too, off the backend's own declared
+`unavailable` block rather than off a vendor name: Ossie states no
+metric-to-dimension relationship, and answering "no metric can be grouped that
+way" would be a claim about the layer where the truth is that this backend was
+never told. The documents are named in `semantic.ossie.files`, including for an
+Ossie-only repository. They are confined to the repository, and selecting Ossie
+without the `[ossie]` extra refuses and names it. dex pins the Ossie schema by
+content hash rather than by the version string the document carries. See
+`references/semantic-layer.md`, and `references/ossie-compatibility.md` for what
+dex accepts, checks, links, and declines to claim under that pin.
 
 `list` costs no warehouse query on either backend, and neither does the reverse
 lookup, which inverts the dimension list each metric already carries rather than
@@ -641,6 +672,11 @@ models reachable from metric definitions rank higher alongside the configured
 `ranking_hints`. The compiled manifest resolves names exactly when present;
 an uncompiled project falls back to name-based resolution and says so. A
 stale manifest (older than the model sources) is noted, not trusted silently.
+
+`explore relationships` and `explore map` also accept the independent
+`--use-hosted-semantic-layer` opt-in. It permits a configured hosted layer read;
+when that layer cannot expose physical relations (as dbt Cloud currently cannot),
+dex reports the partial linkage and does not invent warehouse edges or exposure.
 
 **The project's semantic layer folds in on the same flag**, in both directions,
 and neither direction costs a warehouse query.

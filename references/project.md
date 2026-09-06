@@ -16,13 +16,20 @@ satisfy, and what dex promises to do with it.
 One reason, and it is a real one: your models are not a dbt project.
 
 A host that builds its transformation graph in something else (an orchestrator's
-asset graph, SQLMesh, a semantic layer that owns its own definitions) still has
-everything dex needs to be useful. It knows which tables it builds, at what grain,
-and how they relate. What it does not have is a `dbt_project.yml`, and generating a
-fake one to satisfy dex means maintaining a translation nobody reads and dex cannot
-check.
+asset graph, SQLMesh) still has everything dex needs to be useful. It knows which
+tables it builds, at what grain, and how they relate. What it does not have is a
+`dbt_project.yml`, and generating a fake one to satisfy dex means maintaining a
+translation nobody reads and dex cannot check.
 
 The seam exists so that translation can be code you own instead.
+
+**A semantic layer that owns its own definitions is not one of these**, and
+writing it as a project format is the wrong shape. It builds nothing, so it has
+no model graph to fingerprint and no relation it could claim to own. It belongs
+on the semantic axis instead, as a semantic source with its own contracts. That
+distinction is spelled out under
+[the two protocols beside the tiers](#the-three-tiers) further down, and in full
+in [`semantic-layer.md`](semantic-layer.md).
 
 ## The three tiers
 
@@ -50,6 +57,17 @@ as well as tier 3. Its three methods are `load()`, `edit_path()` and
 `SemanticCatalogProject` is the other, one method, `semantic_catalog()`, and it is
 what `explore semantic list --local` reads. It is described under
 [Reading the semantic layer twice](#reading-the-semantic-layer-twice-for-two-different-questions).
+
+It is here because a *dbt project* happens to hold a semantic layer, not because
+a semantic layer is a project. A repository can have a layer and no
+transformation project at all, and one that does is configured on the semantic
+axis (`semantic.vendor`) and built through
+`exmergo_dex_core.semantic_source`, which checks that what it built can answer a
+catalog and checks nothing else. Nothing on this page applies to it: it owns no
+model graph, no compilation, no targets, and no write surface into dbt's files,
+and it satisfies none of the tiers below. See
+[the semantic layer reference](semantic-layer.md) for that axis and its own
+conformance contracts.
 
 Both are beside rather than on a tier because these protocols are
 `runtime_checkable`: a method added to a tier would demote every format that has not
@@ -697,13 +715,20 @@ format and one format's coordinates are not another's.
 Anything callable that takes a `ProjectContext` and returns a project: a function, a
 class whose `__init__` takes one, or a classmethod like `DbtProject.from_context`.
 
-`ProjectContext` has three fields, and the point of the shape is that a format
-ignores the ones it does not have.
+`ProjectContext` is a set of nullable slots, and the point of the shape is that a
+format ignores the ones it does not have.
 
 - **`repo_root`**, the directory dex was pointed at, or `None` when there is no
   repository in the picture.
 - **`project_dir`**, where within that repository the project was pinned, relative
   to `repo_root`. `None` when nothing pinned one.
+- **`connector`**, the name of the warehouse dex resolved for this run, or `None`
+  when nothing named one. A **name**, never a live adapter and never a credential,
+  so reading it opens no connection and costs nothing. It is here because a format
+  may have to read an authored expression or relation name the way the active
+  warehouse would, and identifier arity, quoting, and unquoted-case folding are
+  the connector's rules: a format that guesses them links a declaration to the
+  wrong column or to none. dbt reads its own target and ignores this.
 - **`options`**, your format's own coordinates, passed through verbatim. dex does
   not interpret them, so the keys are yours to define and yours to validate.
 

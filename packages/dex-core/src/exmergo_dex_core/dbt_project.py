@@ -20,19 +20,17 @@ but transform and maintain require one, since dbt is what they edit and diff.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from enum import Enum
 from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 from .dbt_semantic import (
     ResolvedPath,
@@ -45,8 +43,15 @@ from .dbt_semantic import (
     read_semantic_manifest as _read_semantic_manifest_file,
 )
 from .diffs import file_diff
+from .edits import ApplyResult, Conflict, Edit, EditOp, content_hash
 from .errors import ProjectError
 from .metricflow_dialect import METRIC_TIME
+from .project_definitions import (
+    DeclaredCompositeKey,
+    DeclaredForeignKey,
+    DeclaredKey,
+    ProjectDefinitions,
+)
 from .semantic_catalog import (
     DIMENSIONS_PER_DECLARATION,
     DIMENSIONS_PER_QUERYABLE_PATH,
@@ -177,62 +182,6 @@ class TargetInfo(BaseModel):
     name: str
     type: str
     is_default: bool
-
-
-class EditOp(str, Enum):
-    """The operation an edit performs, orthogonal to the file's ``kind``.
-
-    ``UPSERT`` writes ``new_content`` (create or update, decided by whether the
-    file already exists), the only behavior before deletes existed. ``DELETE``
-    removes the file. The default is ``UPSERT`` so every stored plan written
-    before this field existed deserializes unchanged.
-    """
-
-    UPSERT = "upsert"
-    DELETE = "delete"
-
-
-class Edit(BaseModel):
-    """One proposed file change, pinned to the content it was planned against.
-
-    ``old_content_hash`` is the sha256 of the file at plan time; ``None`` means
-    the file did not exist (a create). ``write_edits`` re-checks it so a human
-    edit after planning is detected as a conflict, never silently overwritten.
-
-    ``op`` distinguishes writing content from removing the file. A delete carries
-    no ``new_content`` (there is nothing to write) but still pins
-    ``old_content_hash``, so removing a file a human edited after planning is a
-    conflict, not a silent deletion.
-    """
-
-    path: str
-    new_content: str | None = None
-    old_content_hash: str | None = None
-    op: EditOp = EditOp.UPSERT
-
-    @model_validator(mode="after")
-    def _content_matches_op(self) -> Edit:
-        if self.op is EditOp.UPSERT and self.new_content is None:
-            raise ValueError(f"an upsert edit needs new_content: '{self.path}'")
-        if self.op is EditOp.DELETE and self.new_content is not None:
-            raise ValueError(f"a delete edit carries no new_content: '{self.path}'")
-        return self
-
-
-class Conflict(BaseModel):
-    path: str
-    expected_sha256: str | None
-    found_sha256: str | None
-
-
-class ApplyResult(BaseModel):
-    written: list[str] = Field(default_factory=list)
-    diffs: list[dict[str, Any]] = Field(default_factory=list)
-    conflicts: list[Conflict] = Field(default_factory=list)
-
-
-def content_hash(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def discover_projects(repo_root: Path | str = ".") -> list[Path]:
@@ -1111,87 +1060,6 @@ def metric_inputs(entry: dict[str, Any]) -> tuple[list[str], list[str]]:
             add(measures, conversion.get("base_measure"))
             add(measures, conversion.get("conversion_measure"))
     return measures, metrics
-
-
-class DeclaredForeignKey(BaseModel):
-    """One ``relationships`` test: child column to parent column.
-
-    ``relation`` / ``to_relation`` carry quote-stripped physical names when the
-    manifest resolves them; the YAML fallback leaves them None, and downstream
-    resolution is name-based.
-    """
-
-    model: str
-    relation: str | None = None
-    column: str
-    to_model: str
-    to_relation: str | None = None
-    to_column: str
-    source: str
-
-
-class DeclaredKey(BaseModel):
-    """A column carrying ``unique`` and/or ``not_null`` tests on one model."""
-
-    model: str
-    relation: str | None = None
-    column: str
-    unique: bool = False
-    not_null: bool = False
-    source: str
-
-
-class DeclaredCompositeKey(BaseModel):
-    """A model-level ``unique_combination_of_columns`` test: the columns whose
-    COMBINATION is unique, never any one of them alone.
-
-    A distinct model from ``DeclaredKey`` rather than a widened ``column``:
-    this test has no ``not_null`` variant and a different multiplicity (it is
-    the model's own claim about several columns together, not one column's own
-    test), so overloading ``column`` to sometimes hold a list would blur two
-    different concepts into one field.
-    """
-
-    model: str
-    relation: str | None = None
-    columns: list[str]
-    source: str
-
-
-class ProjectDefinitions(BaseModel):
-    """What the dbt project declares, loaded once for consumers that must keep
-    working without one.
-
-    ``present`` False means no readable project: every collection is empty and
-    consumers degrade instead of erroring. ``relationship_source`` and
-    ``semantic_source`` record where each half came from (``"manifest"`` is
-    exact, ``"yaml"`` resolves by name). ``model_relations`` maps referable
-    names (model names and ``source.table``) to quote-stripped physical
-    relations. ``primary_entities`` maps model names to their declared grain
-    column; ``metric_models`` lists models reachable from any metric.
-    ``declared_composite_keys`` carries model-level ``unique_combination_of_
-    columns`` tests -- a grain declaration a column-level test structurally
-    cannot express. ``built_relation_names`` is bare table names (lowered) the
-    project builds or sources, from files/YAML alone (populated even with no
-    compiled manifest, unlike ``model_relations``) -- explore's orphan-relation
-    down-ranking reads this. ``notes`` are analyst-readable caveats for the
-    caller's envelope.
-    """
-
-    present: bool = False
-    project_dir: str | None = None
-    manifest_loaded: bool = False
-    manifest_stale: bool = False
-    relationship_source: str | None = None
-    semantic_source: str | None = None
-    foreign_keys: list[DeclaredForeignKey] = Field(default_factory=list)
-    declared_keys: list[DeclaredKey] = Field(default_factory=list)
-    declared_composite_keys: list[DeclaredCompositeKey] = Field(default_factory=list)
-    model_relations: dict[str, str] = Field(default_factory=dict)
-    primary_entities: dict[str, str] = Field(default_factory=dict)
-    metric_models: list[str] = Field(default_factory=list)
-    built_relation_names: list[str] = Field(default_factory=list)
-    notes: list[str] = Field(default_factory=list)
 
 
 def definitions(

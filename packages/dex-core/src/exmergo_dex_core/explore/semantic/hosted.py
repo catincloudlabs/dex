@@ -214,6 +214,17 @@ class HostedDbtCloudBackend:
 
         return decode_hosted_catalog(data, self)
 
+    def declared_relationships(self) -> list[Any]:
+        """Cloud omits physical relations, so it cannot make safe edges."""
+
+        return []
+
+    def declared_keys(self) -> tuple[list[Any], list[Any]]:
+        """dbt's own declared keys already reach grain through its project
+        format's ``definitions()``; stating them here too would double them."""
+
+        return [], []
+
     # ---- query -------------------------------------------------------------
 
     def filter_refs(self, clauses: list[str]) -> list[str] | None:

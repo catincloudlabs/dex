@@ -82,6 +82,7 @@ if TYPE_CHECKING:
         VerifyResult,
     )
     from .references import ReferencesResult
+    from .semantic_source import SemanticCatalogSource
     from .transform.plans import PlanEdit
     from .transform.results import (
         ApplyResult,
@@ -708,9 +709,75 @@ class DexEngine:
             ProjectContext(
                 repo_root=self.repo_root,
                 project_dir=self.config.dbt_project_dir,
+                connector=self.connector or self.config.connector,
                 options=self._project_options,
             ),
         )
+
+    def semantic_catalog_source(self) -> SemanticCatalogSource:
+        """The source that answers the semantic catalog.
+
+        Usually the configured project, and the reason this method exists is the
+        case where it is not. The semantic layer and the transformation project
+        are two axes: a repository can keep dbt for its models and author its
+        semantics as native Apache Ossie documents beside them, or have the
+        documents and no dbt at all. In either arrangement dbt keeps serving the
+        project tiers, or serves nothing, while a separate source answers the
+        catalog.
+
+        **A table lookup rather than a vendor branch, and that is the whole
+        point.** The alternative shape, an `if vendor == ...` at each call site,
+        was what this replaced: it put a vendor name inside two commands and the
+        backend resolver, and the next vendor would have added three more. Here
+        the vendor names a *factory*, the factory is resolved and checked through
+        :mod:`.semantic_source`, and every caller downstream keeps asking for a
+        catalog without knowing who answered.
+
+        **Not the project resolver, deliberately.** A semantic source owns no
+        model graph, no compilation, and no write surface, so routing it through
+        `build_project` would make it satisfy `ExploreProject` to get built, which
+        is a format claiming capabilities it does not have. The two seams check
+        different things because they promise different things.
+
+        Not to be confused with ``self.semantic_source``, which is a *credential*
+        for the hosted dbt Cloud Semantic Layer. This builds a *reader*.
+
+        The source is built per call for the same reason :meth:`project_format`
+        builds per command: it reads a file a later command may rewrite.
+        """
+
+        from .config import SEMANTIC_SOURCE_FACTORIES
+        from .semantic_source import SemanticSourceContext, build_semantic_source
+
+        vendor = (getattr(self.config.semantic, "vendor", None) or "dbt").lower()
+        named = SEMANTIC_SOURCE_FACTORIES.get(vendor)
+        if named is None:
+            return self.project_format()
+        # The vendor's own coordinates, read from the config section named after
+        # it (`semantic.ossie` for `vendor: ossie`) and passed through as the
+        # source's options. They live on the semantic axis because that is the
+        # axis the user is configuring.
+        section = getattr(self.config.semantic, vendor, None)
+        options = section.model_dump() if section is not None else {}
+        return build_semantic_source(
+            named,
+            SemanticSourceContext(
+                repo_root=self.repo_root,
+                connector=self.connector or self.config.connector,
+                options=options,
+            ),
+        )
+
+    def semantic_catalog_format(self) -> SemanticCatalogSource:
+        """Compatibility spelling of :meth:`semantic_catalog_source`.
+
+        Public since the release that introduced the second semantic axis, and
+        kept because an integration may hold it. The name is wrong now: what it
+        returns is a semantic source, and only in the dbt case is it also a
+        project format.
+        """
+
+        return self.semantic_catalog_source()
 
     def maintain_project(self) -> MaintainProject | None:
         """The project when it can serve as a drift baseline, else ``None``.
@@ -873,6 +940,7 @@ class DexEngine:
         infer_by_overlap: bool = False,
         refresh: bool = False,
         use_project: bool = False,
+        use_hosted_semantic_layer: bool = False,
     ) -> RelationshipsResult:
         from .explore import commands as explore
 
@@ -882,6 +950,7 @@ class DexEngine:
             infer_by_overlap=infer_by_overlap,
             refresh=refresh,
             use_project=use_project,
+            use_hosted_semantic_layer=use_hosted_semantic_layer,
         )
 
     def map(
@@ -893,6 +962,7 @@ class DexEngine:
         infer_by_overlap: bool = False,
         refresh: bool = False,
         use_project: bool = False,
+        use_hosted_semantic_layer: bool = False,
     ) -> MapResult:
         from .explore import commands as explore
 
@@ -904,6 +974,7 @@ class DexEngine:
             verify=verify,
             refresh=refresh,
             use_project=use_project,
+            use_hosted_semantic_layer=use_hosted_semantic_layer,
         )
 
     def query(self, sql: str, *, auto_profile: bool | None = None) -> QueryResult:
@@ -1219,6 +1290,15 @@ class DexEngine:
         return transform.semantic_plan(
             self, intent, edits, definitions=definitions, no_parse=no_parse
         )
+
+    def semantic_ossie(
+        self, mode: str, intent: str, edits: list[PlanEdit]
+    ) -> PlanResult:
+        """Plan native semantic-document edits on the semantic-layer axis."""
+
+        from .transform import native_semantic
+
+        return native_semantic.semantic_ossie(self, intent, edits, mode=mode)
 
     # --- lifecycle ------------------------------------------------------------
 

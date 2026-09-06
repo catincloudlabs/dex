@@ -23,9 +23,11 @@ from __future__ import annotations
 import argparse
 import contextlib
 import sys
+from typing import Any
 
 from . import command_args
 from . import envelope as env
+from .config import SEMANTIC_SOURCE_FACTORIES
 from .engine import DexEngine
 from .guards.cost_guard import ConfirmationRequiredError, CostGuardError
 from .guards.dialect import DialectDependencyError
@@ -69,7 +71,10 @@ COMMAND_SURFACE: dict[str, list[str]] = {
         "place",
         "test",
     ],
-    "semantic": ["define", "update", "plan"],
+    # `define`/`update`/`plan` author the dbt semantic layer; each vendor whose
+    # semantic layer is its own project format gets a subcommand of its own name
+    # for authoring that layer's native documents.
+    "semantic": ["define", "update", "plan", *SEMANTIC_SOURCE_FACTORIES],
     # maintain: keep the dbt project correct as the world drifts. `snapshot`
     # captures the known-good baseline; `check` sweeps every axis against it;
     # `schema`/`volume`/`grain`/`semantic` are the per-axis deep detectors;
@@ -195,7 +200,7 @@ _GROUP_HELP: dict[str, str] = {
     "connect": "check a connector's own credentials and capabilities",
     "explore": "make sense of a warehouse: rank objects, profile columns, infer joins",
     "transform": "author and refactor dbt models, tests, and the semantic layer",
-    "semantic": "define dbt semantic models and metrics as reviewable diffs",
+    "semantic": "define dbt or native Ossie semantics as reviewable diffs",
     "maintain": "detect drift against the last snapshot and propose the fix",
     "viz": "preview the semantic layer (not yet implemented)",
     "demo": "create a seeded local DuckDB warehouse to try dex against "
@@ -409,6 +414,12 @@ def _build_parser() -> argparse.ArgumentParser:
                         action="store_true",
                         default=argparse.SUPPRESS,
                     )
+                if group == "explore" and name in {"relationships", "map"}:
+                    sp.add_argument(
+                        "--use-hosted-semantic-layer",
+                        action="store_true",
+                        default=argparse.SUPPRESS,
+                    )
                 # transform init takes the project name; plan the intent; apply
                 # the plan id; macro the shipped-macro name (none lists them).
                 if group == "transform" and name in {"init", "plan", "apply", "macro"}:
@@ -501,7 +512,7 @@ def _build_parser() -> argparse.ArgumentParser:
                     # unit_tests: skeleton from. No bare `transform test`
                     # mode exists yet, unlike `macro`'s list-when-bare shape.
                     sp.add_argument("--scaffold", default=None)
-                if group == "semantic":
+                if group == "semantic" and name in {"define", "update", "plan"}:
                     sp.add_argument("argument", nargs="?", default=None)
                     sp.add_argument("--edits-file", default=None)
                     # The per-definition payload: name only what changes, and the
@@ -510,6 +521,18 @@ def _build_parser() -> argparse.ArgumentParser:
                     # away: never by going unmentioned.
                     sp.add_argument("--definitions-file", default=None)
                     sp.add_argument("--no-parse", action="store_true", default=False)
+                if group == "semantic" and name in SEMANTIC_SOURCE_FACTORIES:
+                    # Whole documents in, so no `--definitions-file`: a native
+                    # document is authored as a unit, and the mode the dbt
+                    # routes carry in their subcommand name is an argument here.
+                    sp.add_argument(
+                        "mode",
+                        nargs="?",
+                        choices=["define", "update", "plan"],
+                        default=None,
+                    )
+                    sp.add_argument("argument", nargs="?", default=None)
+                    sp.add_argument("--edits-file", default=None)
                 # maintain detectors take an optional object scope (default: whole
                 # project); reconcile takes an optional drift class to fix.
                 if group == "maintain" and name in {
@@ -665,6 +688,30 @@ def _run(args: argparse.Namespace, engine: DexEngine) -> env.Envelope:
 
         return cmd_references(args, engine)
 
+    # Native semantic authoring is routed around the table for the same trade,
+    # and without `ensure_dialect_available`: it authors whole documents through
+    # the vendor's own reader, so structure and integrity need only that
+    # vendor's extra. Parsing a SQL expression inside a document is optional and
+    # names its own skip when the dialect engine is absent, which is a weaker
+    # floor than the dbt authoring routes below can accept.
+    if args.group == "semantic" and args.subcommand in SEMANTIC_SOURCE_FACTORIES:
+        from .transform.native_semantic import cmd_semantic_ossie
+
+        return cmd_semantic_ossie(args, engine)
+
+    # `transform apply` writes bytes a plan already validated, so what it needs
+    # depends on the plan rather than on the verb. A semantic-document plan
+    # authors no SQL and reaches no dialect engine; gating it on sqlglot anyway
+    # would let an install that carries only a semantic reader author a plan it
+    # could never apply, which is the one command that install exists to run.
+    # The stored plan says which it is, so ask it and gate only what needs it.
+    if args.group == "transform" and args.subcommand == "apply":
+        if _apply_authors_sql(args, engine):
+            ensure_dialect_available()
+        from .transform.commands import cmd_apply
+
+        return cmd_apply(args, engine)
+
     handler = authoring.get((args.group, args.subcommand))
     if handler is not None:
         ensure_dialect_available()
@@ -674,6 +721,28 @@ def _run(args: argparse.Namespace, engine: DexEngine) -> env.Envelope:
 
     # Everything else is scaffolded against the contract but not yet built.
     return env.not_implemented(command_args.command_name(args))
+
+
+def _apply_authors_sql(args: argparse.Namespace, engine: Any) -> bool:
+    """Whether the plan this apply would write reaches the dialect engine.
+
+    Fails toward gating. Every reason this cannot answer (no store, no plan, an
+    unreadable one) is a reason the apply is about to refuse anyway, and it
+    should refuse with the message it always did rather than with a new one from
+    a route that was only trying to decide whether to check a dependency.
+    """
+
+    try:
+        store = engine.require_full_store("applying a plan")
+        plan_id = getattr(args, "argument", None)
+        if not plan_id:
+            latest = store.latest_plan(None)
+            if latest is None:
+                return True
+            plan_id = latest.plan_id
+        return store.load_plan(plan_id).edit_target != "semantic"
+    except Exception:
+        return True
 
 
 def main(argv: list[str] | None = None) -> int:
