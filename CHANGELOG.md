@@ -28,9 +28,6 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
   the `pii_overrides` prefix reads one contract. No new result field: the
   issue names a `MapResult` field for orphaned entries as the better shape
   for a host, and that is a larger downstream-visible change than this one.
-  Downstream-visible in the sense of the release-notes label: a consumer
-  that stores or compares `map`'s envelope will see warnings it did not
-  before, and only when an override is already orphaned.
 
 ## [1.12.1] - 2026-09-09
 

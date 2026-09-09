@@ -1917,3 +1917,26 @@ def test_map_stays_silent_when_the_pii_override_applies(
     person = {c.name: c for c in hosts.columns}["name"]
     assert person.pii is None
     assert person.pii_overridden == "name", "the audit trail"
+
+
+def test_map_still_warns_when_every_profile_is_a_cache_hit(
+    tpch_names_duckdb: Path, tmp_path: Path, capsys
+):
+    """The scheduled case: the second nightly `map` re-scans nothing, and the
+    orphaned override has to be reported from the carried profiles, or a host
+    hears it exactly once and never again."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_exact_override(repo, "tpch_names.main.hosts.nmae")
+
+    _, first = _map_warnings(tpch_names_duckdb, repo, capsys)
+    payload, second = _map_warnings(tpch_names_duckdb, repo, capsys)
+
+    assert payload["data"]["profiled_count"] == 0, "the second run scanned nothing"
+    assert payload["data"]["cache_hit_count"] >= 1
+    orphaned = [w for w in second if "matches no column" in w]
+    assert orphaned == [w for w in first if "matches no column" in w], (
+        "the same warning, from carried profiles"
+    )
+    assert len(orphaned) == 1, orphaned
