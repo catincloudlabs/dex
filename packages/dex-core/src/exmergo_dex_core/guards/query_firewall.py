@@ -180,23 +180,19 @@ _UNNEST_FUNCS: dict[str, tuple[tuple[type, ...], frozenset[str]]] = {
         frozenset(),
     ),
     "databricks": (
-        # FromJson is its own dedicated expression class as of a sqlglot
-        # release newer than the one pinned here; on the pinned version
-        # `from_json(...)` still parses as a generic Anonymous call, which
-        # the `names` frozenset below already covers. getattr/filter (the
-        # same pattern `_QUERY_ROOTS` above already uses) so referencing the
-        # class by name never breaks the pinned version that does not have
-        # it, and the newer, more specific parse is recognized once it does.
+        # Newer sqlglot releases parse from_json as FromJson rather than
+        # Anonymous. Keep both forms without requiring the new class on
+        # older supported releases.
         tuple(
-            c
-            for c in (
+            cls
+            for cls in (
                 exp.Explode,
                 exp.JSONKeys,
                 exp.JSONExtractScalar,
                 exp.ParseJSON,
                 getattr(exp, "FromJson", None),
             )
-            if isinstance(c, type)
+            if isinstance(cls, type)
         ),
         frozenset({"from_json", "variant_explode", "try_parse_json"}),
     ),
