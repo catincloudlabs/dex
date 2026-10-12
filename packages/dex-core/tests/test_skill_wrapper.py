@@ -282,13 +282,22 @@ def test_both_ways_into_uv_carry_the_child_env(argv, monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_not_real")
     monkeypatch.setenv("DATABASE_URL", "postgresql://dex_ro@localhost/app")
     monkeypatch.setattr(module.shutil, "which", lambda _name: "/usr/local/bin/uv")
-    monkeypatch.setattr(module.os, "name", "posix")
     envs: list[dict[str, str]] = []
+    # The wrapper execs on POSIX and spawns through `subprocess.call` elsewhere,
+    # and warms through `subprocess.run` everywhere. All three are intercepted,
+    # so the environment is asserted on whichever branch this platform takes,
+    # rather than forcing one by setting `os.name`, which `module.os` shares
+    # with the whole process and pathlib reads to choose its path class.
     monkeypatch.setattr(
         module.os, "execvp", lambda *_a: pytest.fail("exec bypassed the child env")
     )
     monkeypatch.setattr(
         module.os, "execvpe", lambda _file, _cmd, env: envs.append(env) or None
+    )
+    monkeypatch.setattr(
+        module.subprocess,
+        "call",
+        lambda _cmd, **kwargs: envs.append(kwargs.get("env")) or 0,
     )
     monkeypatch.setattr(
         module.subprocess,
