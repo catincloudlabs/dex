@@ -9,6 +9,23 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An uncompiled project's composite keys and foreign keys are read when their
+  inputs sit under `arguments:`** ([#565]). dbt has asked for a generic test's
+  inputs under `arguments:` since dbt Core 1.10.8, and dbt-utils documents
+  `unique_combination_of_columns` that way, but the schema-YAML reader dex
+  falls back to without a compiled `target/manifest.json` looked for
+  `combination_of_columns`, `to` and `field` only beside the test's name. A
+  test written the current way declared no key and no join, and nothing said
+  so. The compiled read was unaffected, because dbt merges `arguments:` into
+  the manifest's kwargs. The YAML reader now merges it the same way, with
+  `arguments` winning over a key beside it as in dbt, and also reads the
+  `test_name:` spelling (`- name: ...` with `test_name: unique`), which
+  declared nothing either. Checked against `dbt parse` on dbt-core 1.11.11:
+  across all four spellings, the compiled and uncompiled reads now agree on
+  every composite key, foreign key, and `unique`/`not_null` key.
+
 ## [1.13.0] - 2026-10-12
 
 ### Changed

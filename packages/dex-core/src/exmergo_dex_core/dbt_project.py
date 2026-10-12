@@ -1456,6 +1456,38 @@ def _declared_from_manifest(manifest: dict[str, Any], defs: ProjectDefinitions) 
     defs.relationship_source = "manifest"
 
 
+def _named_tests(test: dict[str, Any]) -> list[tuple[str, Any]]:
+    """``(test name, its mapping)`` for one dict entry of a ``tests:`` list.
+
+    dbt documents two spellings and ``TestBuilder.extract_test_args`` reads
+    both: the name as the entry's key with the test's mapping as its value
+    (``{unique: {...}}``), and the name under ``test_name:`` beside the rest
+    of the mapping (``{name: ..., test_name: unique, arguments: {...}}``).
+    """
+
+    name = test.get("test_name")
+    if isinstance(name, str):
+        return [(name, test)]
+    return list(test.items())
+
+
+def _test_arguments(config: Any) -> dict[str, Any]:
+    """A generic test's inputs as dbt reads them from its YAML mapping.
+
+    Since dbt Core 1.10.8 (``require_generic_test_arguments_property``, on by
+    default) inputs are written under ``arguments:``, and dbt merges that
+    mapping over the keys beside it, ``arguments`` winning, before the test
+    sees them. The manifest path never needs this, because the manifest's
+    ``test_metadata.kwargs`` is the merged result; the YAML path does, or it
+    reads no input from a test written the way dbt now asks.
+    """
+
+    if not isinstance(config, dict):
+        return {}
+    arguments = config.get("arguments")
+    return {**config, **arguments} if isinstance(arguments, dict) else config
+
+
 def _declared_from_yaml(view: DbtProjectView, defs: ProjectDefinitions) -> None:
     """Column-level tests straight from schema YAML: model-level names only,
     no physical resolution. Model-level relationships tests (declared under the
@@ -1465,6 +1497,11 @@ def _declared_from_yaml(view: DbtProjectView, defs: ProjectDefinitions) -> None:
     (it names no single column), so it is read from the model's own ``tests:``/
     ``data_tests:`` block -- sibling to ``columns:``, never reached by the
     column loop below.
+
+    Each test is read the way dbt reads it (``_named_tests``,
+    ``_test_arguments``), so the inputs are found whether they are written
+    beside the test's name or under ``arguments:``, and the compiled and
+    uncompiled reads of one project agree.
     """
 
     keys: dict[tuple[str, str], DeclaredKey] = {}
@@ -1480,7 +1517,7 @@ def _declared_from_yaml(view: DbtProjectView, defs: ProjectDefinitions) -> None:
                 combo_cfg = next(
                     (
                         cfg
-                        for name, cfg in test.items()
+                        for name, cfg in _named_tests(test)
                         if name == "unique_combination_of_columns"
                         or name.endswith(".unique_combination_of_columns")
                     ),
@@ -1488,8 +1525,7 @@ def _declared_from_yaml(view: DbtProjectView, defs: ProjectDefinitions) -> None:
                 )
                 if combo_cfg is None:
                     continue
-                combo_cfg = combo_cfg if isinstance(combo_cfg, dict) else {}
-                combo = combo_cfg.get("combination_of_columns")
+                combo = _test_arguments(combo_cfg).get("combination_of_columns")
                 if (
                     isinstance(combo, list)
                     and len(combo) >= 2
@@ -1512,9 +1548,9 @@ def _declared_from_yaml(view: DbtProjectView, defs: ProjectDefinitions) -> None:
                 for test in tests:
                     kind = test if isinstance(test, str) else None
                     if isinstance(test, dict):
-                        if "relationships" in test:
-                            cfg = test.get("relationships")
-                            cfg = cfg if isinstance(cfg, dict) else {}
+                        named = dict(_named_tests(test))
+                        if "relationships" in named:
+                            cfg = _test_arguments(named["relationships"])
                             to_model = _parse_relation_ref(cfg.get("to"))
                             field = cfg.get("field")
                             if to_model and isinstance(field, str) and field:
@@ -1529,7 +1565,7 @@ def _declared_from_yaml(view: DbtProjectView, defs: ProjectDefinitions) -> None:
                                 )
                             continue
                         kind = next(
-                            (k for k in ("unique", "not_null") if k in test), None
+                            (k for k in ("unique", "not_null") if k in named), None
                         )
                     if kind in ("unique", "not_null"):
                         key = keys.setdefault(

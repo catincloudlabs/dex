@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 import pytest
+import yaml
 from conftest import write_manifest, write_semantic_manifest
 from maintain.conftest import SEMANTIC_YAML
 
@@ -526,6 +527,129 @@ def test_definitions_yaml_namespaced_composite_unique_key(dbt_project_dir: Path)
     defs = definitions(dbt_project_dir)
     (composite,) = defs.declared_composite_keys
     assert composite.columns == ["id", "email"]
+
+
+_GRAIN = {"combination_of_columns": ["order_id", "line_number"]}
+_JOIN = {"to": "ref('stg_customers')", "field": "id"}
+
+
+@pytest.mark.parametrize(
+    ("grain_test", "join_test"),
+    [
+        pytest.param(
+            {"dbt_utils.unique_combination_of_columns": _GRAIN},
+            {"relationships": _JOIN},
+            id="inputs-beside-the-name",
+        ),
+        pytest.param(
+            {"dbt_utils.unique_combination_of_columns": {"arguments": _GRAIN}},
+            {"relationships": {"arguments": _JOIN}},
+            id="inputs-under-arguments",
+        ),
+        pytest.param(
+            {
+                "name": "stg_orders_grain",
+                "test_name": "dbt_utils.unique_combination_of_columns",
+                "arguments": _GRAIN,
+            },
+            {
+                "name": "stg_orders_customer",
+                "test_name": "relationships",
+                "arguments": _JOIN,
+            },
+            id="test-name-with-arguments",
+        ),
+        pytest.param(
+            {"test_name": "dbt_utils.unique_combination_of_columns", **_GRAIN},
+            {"test_name": "relationships", **_JOIN},
+            id="test-name-with-inputs-beside-it",
+        ),
+    ],
+)
+def test_definitions_yaml_reads_every_spelling_dbt_reads(
+    dbt_project_dir: Path, grain_test: dict, join_test: dict
+):
+    """#565: dbt has asked for a generic test's inputs under ``arguments:``
+    since 1.10.8, and the compiled read always saw them because dbt merges
+    that block into the manifest's kwargs. The YAML read now merges it the
+    same way, and reads the ``test_name:`` spelling, so every form dbt
+    accepts yields the same composite key and the same foreign key."""
+
+    (dbt_project_dir / "models" / "staging" / "stg_orders.sql").write_text(
+        "select 1 as order_id, 1 as line_number, 1 as customer_id\n",
+        encoding="utf-8",
+    )
+    schema = {
+        "version": 2,
+        "models": [
+            {
+                "name": "stg_orders",
+                "data_tests": [grain_test],
+                "columns": [{"name": "customer_id", "data_tests": [join_test]}],
+            }
+        ],
+    }
+    (dbt_project_dir / "models" / "staging" / "orders_schema.yml").write_text(
+        yaml.safe_dump(schema, sort_keys=False), encoding="utf-8"
+    )
+    defs = definitions(dbt_project_dir)
+    assert defs.relationship_source == "yaml"
+    (composite,) = defs.declared_composite_keys
+    assert (composite.model, composite.columns) == (
+        "stg_orders",
+        ["order_id", "line_number"],
+    )
+    (fk,) = defs.foreign_keys
+    assert (fk.model, fk.column, fk.to_model, fk.to_column) == (
+        "stg_orders",
+        "customer_id",
+        "stg_customers",
+        "id",
+    )
+
+
+def test_definitions_yaml_arguments_win_over_the_keys_beside_them(
+    dbt_project_dir: Path,
+):
+    """dbt merges ``arguments:`` over its siblings, so where a project writes
+    an input in both places the one under ``arguments:`` is the one dbt
+    tests, and the one dex must report."""
+
+    (dbt_project_dir / "models" / "staging" / "schema.yml").write_text(
+        "version: 2\n"
+        "models:\n"
+        "  - name: stg_customers\n"
+        "    data_tests:\n"
+        "      - unique_combination_of_columns:\n"
+        "          combination_of_columns: [id, name]\n"
+        "          arguments:\n"
+        "            combination_of_columns: [id, email]\n",
+        encoding="utf-8",
+    )
+    (composite,) = definitions(dbt_project_dir).declared_composite_keys
+    assert composite.columns == ["id", "email"]
+
+
+def test_definitions_yaml_reads_unique_and_not_null_by_test_name(
+    dbt_project_dir: Path,
+):
+    (dbt_project_dir / "models" / "staging" / "schema.yml").write_text(
+        "version: 2\n"
+        "models:\n"
+        "  - name: stg_customers\n"
+        "    columns:\n"
+        "      - name: id\n"
+        "        data_tests:\n"
+        "          - name: stg_customers_id_unique\n"
+        "            test_name: unique\n"
+        "          - test_name: not_null\n"
+        "            config:\n"
+        "              severity: warn\n",
+        encoding="utf-8",
+    )
+    (key,) = definitions(dbt_project_dir).declared_keys
+    assert (key.model, key.column) == ("stg_customers", "id")
+    assert key.unique is True and key.not_null is True
 
 
 def test_definitions_manifest_source_parent_and_backtick_quoting(
