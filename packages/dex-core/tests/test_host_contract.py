@@ -44,7 +44,7 @@ def test_the_facade_re_exports_rather_than_re_implements():
     """Every name is the engine's own object. A host importing from here and the
     engine deciding internally must be running the same code."""
 
-    from exmergo_dex_core.envelope import EstimateQuality
+    from exmergo_dex_core.envelope import EstimateQuality, Reason, reason_for
     from exmergo_dex_core.transform.classify import classify_content
     from exmergo_dex_core.transform.evidence import BuildOutcome
     from exmergo_dex_core.transform.plans import PlanEdit
@@ -55,6 +55,8 @@ def test_the_facade_re_exports_rather_than_re_implements():
     assert host.BuildOutcome is BuildOutcome
     assert host.EstimateQuality is EstimateQuality
     assert host.PlanEdit is PlanEdit
+    assert host.reason_for is reason_for
+    assert host.Reason is Reason
 
 
 def test_the_edit_vocabulary_is_reachable_here_and_nowhere_else():
@@ -231,6 +233,92 @@ def test_every_new_refusal_serializes_safely_and_names_a_reason():
         sanitize(envelope)
         assert envelope.errors
         assert reason_for(exc) is not Reason.INTERNAL, type(exc).__name__
+
+
+def _classified_rows() -> list[type[BaseException]]:
+    from exmergo_dex_core.envelope import _reason_overrides
+
+    return [exc_type for exc_type, _ in _reason_overrides()]
+
+
+def _raised_through_the_cli(exc, monkeypatch, capsys, duckdb_file) -> dict:
+    """The envelope the CLI prints when a real command raises ``exc``.
+
+    Raised from inside ``_run`` so it reaches the envelope through whichever door
+    the CLI gives it: one of ``dispatch``'s typed arms, or ``main``'s catch-all.
+    """
+
+    from exmergo_dex_core import cli
+
+    def raiser(args, engine):
+        raise exc
+
+    monkeypatch.setattr(cli, "_run", raiser)
+    cli.main(["connect", "test", "--path", str(duckdb_file)])
+    return json.loads(capsys.readouterr().out)
+
+
+def test_the_suite_classifies_against_the_full_table():
+    """The positive control for the parity test below, which reads the table it
+    runs over: with the ``sql`` extra missing the second tier is absent, the
+    parity test would pass over the first tier alone, and nothing would say so."""
+
+    pytest.importorskip("sqlglot")
+    from exmergo_dex_core.guards.cost_guard import CostGuardError
+
+    assert CostGuardError in _classified_rows()
+
+
+@pytest.mark.parametrize("exc_type", _classified_rows(), ids=lambda c: c.__name__)
+def test_a_host_reads_the_reason_the_cli_prints(
+    exc_type, monkeypatch, capsys, tmp_path, duckdb_file
+):
+    """`host.reason_for` is the `reason` the CLI's envelope carries, for every row
+    of the classification table.
+
+    They agree because every error envelope the CLI builds from an exception goes
+    through `error_for`, which calls the function a host imports. A new arm that
+    sets `reason` another way, or builds an envelope without one, fails here and
+    names the class it broke.
+    """
+
+    from exmergo_dex_core.transform.commands import BuildFailedError
+    from exmergo_dex_core.transform.results import BuildResult
+
+    monkeypatch.chdir(tmp_path)
+    if issubclass(exc_type, BuildFailedError):  # it carries the failed build
+        exc = exc_type("dbt build failed", result=BuildResult())
+    else:
+        exc = exc_type("refused")
+
+    envelope = _raised_through_the_cli(exc, monkeypatch, capsys, duckdb_file)
+
+    assert envelope["status"] == "error"
+    assert envelope["reason"] == host.reason_for(exc).value
+
+
+def test_a_confirmation_request_is_not_a_refusal_a_host_classifies(
+    monkeypatch, capsys, tmp_path, duckdb_file
+):
+    """The one exception where `reason_for` and the CLI part ways, on purpose.
+
+    `ConfirmationRequiredError` is a `CostGuardError`, so the table reads it as
+    `guard`. It asks for a confirmation rather than refusing, and the CLI answers
+    it with `needs_confirmation` and no `reason`, which is why the docstring and
+    the reference tell a host to catch it first.
+    """
+
+    from exmergo_dex_core import ConfirmationRequiredError
+    from exmergo_dex_core.envelope import Cost
+
+    monkeypatch.chdir(tmp_path)
+    exc = ConfirmationRequiredError(Cost(estimate=1.0))
+
+    envelope = _raised_through_the_cli(exc, monkeypatch, capsys, duckdb_file)
+
+    assert envelope["status"] == "needs_confirmation"
+    assert envelope["reason"] is None
+    assert host.reason_for(exc) is host.Reason.GUARD
 
 
 def test_the_vectors_are_packaged_beside_the_code_that_reads_them():

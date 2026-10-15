@@ -9,6 +9,22 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
 
 ## [Unreleased]
 
+### Added
+
+- **`exmergo_dex_core.host` exports `Reason` and `reason_for`**
+  ([#582](https://github.com/exmergo/dex/issues/582)). A host that calls
+  `DexEngine` in process holds the exception rather than an envelope, and had no
+  public way to get the `reason` the CLI would have printed for it. Both names
+  are the envelope's own objects, so a host and the CLI classify a refusal with
+  the same function, and a test runs every row of the classification table
+  through the CLI to keep them together. `ConfirmationRequiredError` is the one
+  exception a host meets that is not a refusal: `reason_for` reads it as `guard`,
+  while the CLI answers it with `needs_confirmation` and no `reason`. The
+  docstring and `references/host-integration.md` say so, and also that the full
+  table needs the `sql` extra, which every warehouse connector extra brings.
+  Without it, a class listed only in the table's second tier reads its nearest
+  listed ancestor, so `CostGuardError` reads `request` rather than `guard`.
+
 ## [1.13.2] - 2026-10-14
 
 ### Added

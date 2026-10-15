@@ -442,6 +442,21 @@ def reason_for(exc: BaseException) -> Reason:
     bare ``ValueError`` still reads as ``REQUEST`` (a deliberate refusal, bad
     input assumed) rather than ``INTERNAL``, which is reserved for exceptions
     that are not a deliberate dex refusal at all.
+
+    This is the ``reason`` every CLI error envelope carries, because
+    :func:`error_for` calls it, and :mod:`exmergo_dex_core.host` exports it for a
+    host that calls the engine in process and so holds the exception rather than
+    an envelope. Two things such a host needs to know:
+
+    - ``ConfirmationRequiredError`` reads ``GUARD`` here, but it is not a
+      refusal. The CLI answers it with a ``needs_confirmation`` envelope that
+      carries no ``reason`` at all, so check for it before classifying.
+    - The answer can depend on the install. The table's second tier imports
+      modules that need the ``sql`` extra, and loads only when every one of
+      those imports succeeds. On an install without the extra, a class listed
+      only in that tier reads its nearest listed ancestor instead:
+      ``CostGuardError`` reads ``REQUEST`` rather than ``GUARD``. Every
+      warehouse connector extra brings ``sql``.
     """
 
     for exc_type, reason in _reason_overrides():

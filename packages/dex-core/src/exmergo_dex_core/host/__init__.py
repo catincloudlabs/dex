@@ -99,6 +99,10 @@ _EXPORTS = {
     "EstimateQuality": "envelope",
     "Paradigm": "envelope",
     "paradigm_unit": "envelope",
+    # Why a refusal refused: the classification every CLI error envelope carries
+    # in `reason`, for a host that caught the exception instead of reading one.
+    "Reason": "envelope",
+    "reason_for": "envelope",
     # The edit vocabulary a host builds payloads from. Reachable nowhere else
     # from the package root, which is why it is here rather than assumed.
     "Conflict": "edits",
@@ -114,7 +118,14 @@ _EXPORTS = {
 
 if TYPE_CHECKING:  # what a type checker and an IDE see; never run
     from ..edits import Conflict, Edit, EditOp, content_hash
-    from ..envelope import Cost, EstimateQuality, Paradigm, paradigm_unit
+    from ..envelope import (
+        Cost,
+        EstimateQuality,
+        Paradigm,
+        Reason,
+        paradigm_unit,
+        reason_for,
+    )
     from ..guards.execution import (
         GuardedExecution,
         ProviderControl,
@@ -220,6 +231,7 @@ __all__ = [
     "PortableEdit",
     "PortablePlan",
     "ProviderControl",
+    "Reason",
     "RefusalReason",
     "StatementVerdict",
     "TransformPlan",
@@ -242,6 +254,7 @@ __all__ = [
     "plan_digest",
     "plan_document",
     "plan_drift",
+    "reason_for",
     "required_nodes",
     "source_digest",
     "unverifiable_packages",

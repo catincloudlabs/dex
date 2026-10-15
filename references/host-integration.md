@@ -348,6 +348,36 @@ words, and neither is a contract. In process, the same value is
 `exmergo_dex_core`. A multi-statement `explore query` carries it per statement,
 beside each entry's `reason`.
 
+### Classifying a refusal caught in process
+
+A host that calls `DexEngine` holds the exception rather than an envelope, and
+needs the `reason` the CLI would have printed for it. `reason_for` is the
+function every CLI error envelope is built through, so the two cannot disagree:
+
+```python
+from exmergo_dex_core import ConfirmationRequiredError, DexError
+from exmergo_dex_core.host import Reason, reason_for
+
+try:
+    result = engine.build()
+except ConfirmationRequiredError:
+    ...  # not a refusal: the CLI answers `needs_confirmation`, with no `reason`
+except DexError as exc:
+    if reason_for(exc) is Reason.PREREQUISITE:
+        ...  # run the named setup command, then retry
+```
+
+Catch `ConfirmationRequiredError` first. It is a `CostGuardError`, so
+`reason_for` reads it as `guard`, but it asks for a confirmation rather than
+refusing, and the CLI's envelope for it carries no `reason`.
+
+`Reason` is the envelope's bucket. `RefusalReason`, above, is the narrower answer
+`NotSelectOnlyError` carries about one statement, and a warehouse refusal's door
+is `WarehouseQueryError.stage`. The full table loads wherever the `sql` extra is
+installed, which every warehouse connector extra brings. Without it, a class
+listed only in the table's second tier reads its nearest listed ancestor, so
+`CostGuardError` reads `request` rather than `guard`.
+
 ## 6. Cost, on both outcomes
 
 `cost` carries `estimate_quality` and `unit` alongside the magnitude:
